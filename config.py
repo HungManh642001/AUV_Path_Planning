@@ -1,0 +1,11 @@
+N = 100
+k = 2.0
+alpha = 45.0
+beta = 60
+L_max = 800.0
+L_min = 400.0
+l = 100.0
+p = 0.01
+n_particles = 300
+scan_size = 40
+entropy_threshold = 9.1
