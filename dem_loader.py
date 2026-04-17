@@ -155,19 +155,80 @@ def load_geotiff(path: str | Path, band: int = 1) -> DEMData:
     )
 
 
+def merge_dems(dem_list: list[DEMData], source_path: str | Path) -> DEMData:
+    """
+    Merge multiple DEMData objects into a single DEMData map.
+    """
+    if not dem_list:
+        raise ValueError("DEM list is empty. Please provide at least 1 map tile.")
+
+    # 1. Determine global bounding box
+    min_left = min(d.bounds[0] for d in dem_list)
+    min_bottom = min(d.bounds[1] for d in dem_list)
+    max_right = max(d.bounds[2] for d in dem_list)
+    max_top = max(d.bounds[3] for d in dem_list)
+
+    # Use metadata from the first tile as reference
+    base_dem = dem_list[0]
+    res_x, res_y = base_dem.resolution
+    nodata = base_dem.nodata
+    crs = base_dem.crs
+
+    # 2. Calculate total NumPy array dimensions
+    # Use round() to avoid floating-point errors when dividing coordinates
+    total_cols = int(round((max_right - min_left) / res_x)) + 1
+    total_rows = int(round((max_top - min_bottom) / res_y)) + 1
+
+    # 3. Initialize the merged array with nodata values
+    merged_arr = np.full((total_rows, total_cols), nodata, dtype=np.float32)
+
+    # 4. Calculate positions and paste each tile into the merged array
+    for dem in dem_list:
+        lon0, lat0, lon1, lat1 = dem.bounds
+        side_y, side_x = dem.shape
+
+        # Calculate starting column/row index for this tile on the merged array
+        col_start = int(round((lon0 - min_left) / res_x))
+        row_start = int(round((max_top - lat1) / res_y))
+
+        # Paste the sub-array into the large array.
+        # Edges of adjacent tiles will share the same index and overwrite safely.
+        merged_arr[row_start : row_start + side_y, col_start : col_start + side_x] = dem.array
+
+    # 5. Create new Transform matrix and Bounds
+    merged_transform = Affine.translation(min_left, max_top) * Affine.scale(res_x, -res_y)
+    merged_bounds = (min_left, min_bottom, max_right, max_top)
+
+    return DEMData(
+        array=merged_arr,
+        transform=merged_transform,
+        crs=crs,
+        nodata=nodata,
+        bounds=merged_bounds,
+        resolution=(res_x, res_y),
+        source_path=str(source_path),
+        source_format="merged",
+    )
+
+
 def load_dem(path: str | Path) -> DEMData:
     """Load DEM automatically based on extension (.tif/.tiff/.hgt)."""
     p = Path(path)
-    suffix = p.suffix.lower()
+    dem_files = list(p.rglob("*.hgt"))
+    if not dem_files:
+        print("No map file found to process.")
+        exit(1)
 
-    if suffix in {".tif", ".tiff"}:
-        return load_geotiff(p)
-    if suffix == ".hgt":
-        return load_hgt(p)
+    dem_list = []
+    for file_path in dem_files:
+        dem_list.append(load_hgt(file_path))
 
-    raise ValueError(
-        f"Unsupported DEM format '{suffix}'. Supported: .tif, .tiff, .hgt"
-    )
+    if len(dem_list) > 1:
+        final_dem = merge_dems(dem_list, source_path=p)
+    else:
+        final_dem = dem_list[0]
+
+    return final_dem
 
 
 if __name__ == "__main__":
@@ -175,7 +236,7 @@ if __name__ == "__main__":
     import json
 
     parser = argparse.ArgumentParser(description="Load DEM (.tiff/.hgt) and print metadata summary.")
-    parser.add_argument("dem_path", type=str, help="Path to DEM file (.tif/.tiff/.hgt)")
+    parser.add_argument("dem_path", type=str, help="Path to DEM folder (.hgt)")
     args = parser.parse_args()
 
     dem = load_dem(args.dem_path)
