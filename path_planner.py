@@ -325,7 +325,7 @@ class TANPathPlanner:
                     L_min=self.params.L_min,
                     l=self.params.l,
                     p=self.params.p,
-                    terrain_size=self.params.terrain_size,
+                    # terrain_size=self.params.terrain_size,
                 )
                 next_wp = search_tan_suitable_in_sector(
                     auv_x, auv_y,
@@ -504,7 +504,7 @@ if __name__ == "__main__":
     params = SectorParams(
         N=50, k=2.0, alpha=45.0, beta=60.0,
         L_max=100.0, L_min=40.0, l=10.0, p=0.05,
-        terrain_size=500,
+        # terrain_size=500,
     )
 
     result = run_case_study(
