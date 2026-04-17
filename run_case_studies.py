@@ -25,6 +25,7 @@ from dem_loader import DEMData, load_dem
 from path_planner import PathPlanningResult, TANPathPlanner
 from sector_search import SectorParams
 from terrain_map import generate_synthetic_terrain
+import config
 
 
 @dataclass
@@ -66,11 +67,6 @@ class TerrainSourceMeta:
 def get_default_case_studies(terrain_size: int) -> List[CaseStudyConfig]:
     """Return 4 representative case studies for current terrain size."""
     # Keep same normalized layout as legacy 500x500 examples
-    scale = terrain_size / 500.0
-
-    def s(x: float, y: float) -> Tuple[float, float]:
-        return (x * scale, y * scale)
-
     base_params = dict(
         N=max(20, int(round(50 * scale))),
         k=2.0,
@@ -80,7 +76,7 @@ def get_default_case_studies(terrain_size: int) -> List[CaseStudyConfig]:
         L_min=40.0 * scale,
         l=10.0 * scale,
         p=0.05,
-        terrain_size=terrain_size,
+        # terrain_size=terrain_size,
     )
     return [
         CaseStudyConfig(
@@ -150,7 +146,6 @@ def _normalize_positive(arr: np.ndarray, out_min: float = 50.0, out_max: float =
 
 def load_terrain_for_case_studies(
     dem_path: Optional[str],
-    terrain_size: int,
     terrain_seed: int,
     noise_coefficient: float,
 ) -> Tuple[np.ndarray, TerrainSourceMeta]:
@@ -160,8 +155,9 @@ def load_terrain_for_case_studies(
     if dem_path:
         dem = load_dem(dem_path)
         cleaned = _clean_dem_array(dem)
-        resampled = _resample_to_square(cleaned, terrain_size)
-        terrain = _normalize_positive(resampled)
+        # resampled = _resample_to_square(cleaned, terrain_size)
+        # terrain = _normalize_positive(resampled)
+        terrain = cleaned
 
         meta = TerrainSourceMeta(
             source_type="dem",
@@ -172,7 +168,7 @@ def load_terrain_for_case_studies(
         return terrain.astype(np.float64), meta
 
     terrain = generate_synthetic_terrain(
-        size=terrain_size,
+        size=500,
         seed=terrain_seed,
         noise_coefficient=noise_coefficient,
     )
@@ -214,12 +210,14 @@ def plot_case_result(
     title: str,
 ) -> None:
     """Create a 2-panel figure: terrain+path and entropy suitability map."""
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(20, 14), constrained_layout=True)
 
     # Left panel: terrain + path
-    levels = np.linspace(terrain.min(), terrain.max(), 26)
-    cf = axes[0].contourf(terrain, levels=levels, cmap="terrain", alpha=0.88)
-    axes[0].contour(terrain, levels=levels[::2], colors="k", linewidths=0.25, alpha=0.35)
+    H, W = terrain.shape
+    levels = np.linspace(terrain.min(), terrain.max(), 30)
+    cf = axes[0].imshow(terrain, cmap="terrain_r", extent=(0, W, 0, H))
+    axes[0].contourf(terrain, levels=levels, cmap="terrain_r", alpha=0.85)
+    axes[0].contour(terrain, levels=levels[::3], colors="k", linewidths=0.25, alpha=0.35)
     _draw_path(axes[0], result)
     axes[0].set_title(f"{title}\nDEM Terrain & Planned TAN Path")
     axes[0].set_xlabel("X (grid)")
@@ -322,7 +320,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run 4 TAN path-planning case studies + plotting.")
     parser.add_argument("--output-dir", type=str, default="outputs", help="Directory for plots and JSON outputs.")
     parser.add_argument("--dem-path", type=str, default=None, help="Path to DEM file (.tif/.tiff/.hgt).")
-    parser.add_argument("--terrain-size", type=int, default=500, help="Terrain size used by planner (default 500).")
+    # parser.add_argument("--terrain-size", type=int, default=500, help="Terrain size used by planner (default 500).")
     parser.add_argument("--terrain-seed", type=int, default=42, help="Seed for synthetic terrain generation.")
     parser.add_argument("--noise-coef", type=float, default=0.3, help="Synthetic terrain noise coefficient.")
     parser.add_argument("--planner-seed", type=int, default=2026, help="Base seed for planner stochastic simulation.")
@@ -334,7 +332,6 @@ def main() -> None:
 
     terrain, terrain_meta = load_terrain_for_case_studies(
         dem_path=args.dem_path,
-        terrain_size=args.terrain_size,
         terrain_seed=args.terrain_seed,
         noise_coefficient=args.noise_coef,
     )
@@ -347,7 +344,7 @@ def main() -> None:
         "| source_path=", terrain_meta.source_path,
     )
 
-    cases = get_default_case_studies(terrain_size=args.terrain_size)
+    cases = get_default_case_studies()
     all_metrics: List[CaseStudyMetrics] = []
 
     for i, case in enumerate(cases):
