@@ -260,8 +260,11 @@ def find_all_suitable_blocks(
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from terrain_map import generate_synthetic_terrain
+    from dem_loader import load_dem 
 
-    terrain = generate_synthetic_terrain(size=500, seed=42, noise_coefficient=0.3)
+    # terrain = generate_synthetic_terrain(size=500, seed=42, noise_coefficient=0.3)
+    dem_data = load_dem("data")
+    terrain = dem_data.array
     entropy_map, suitability_map, threshold = build_suitability_map(
         terrain, block_size=50
     )
@@ -271,11 +274,12 @@ if __name__ == "__main__":
     print(f"Threshold (median): {threshold:.4f}")
     print(f"Number of suitable blocks: {suitability_map.sum()} / {suitability_map.size}")
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    W, H = terrain.shape
+    fig, axes = plt.subplots(1, 2, figsize=(10, 10))
 
     # Entropy map
     im = axes[0].imshow(entropy_map, origin='lower', cmap='RdYlGn',
-                        extent=[0, 500, 0, 500])
+                        extent=[0, H, 0, W])
     plt.colorbar(im, ax=axes[0], label='Terrain Elevation Entropy')
     axes[0].set_title(f'Block Entropy Map (threshold={threshold:.4f})')
     axes[0].set_xlabel('X (m)')
@@ -283,7 +287,7 @@ if __name__ == "__main__":
 
     # Suitability map
     im2 = axes[1].imshow(suitability_map.astype(int), origin='lower',
-                         cmap='RdYlGn', extent=[0, 500, 0, 500], vmin=0, vmax=1)
+                         cmap='RdYlGn', extent=[0, H, 0, W], vmin=0, vmax=1)
     plt.colorbar(im2, ax=axes[1], label='TAN Suitable (1=Yes, 0=No)')
     axes[1].set_title('TAN Suitability Map')
     axes[1].set_xlabel('X (m)')

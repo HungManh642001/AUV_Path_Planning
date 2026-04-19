@@ -64,47 +64,46 @@ class TerrainSourceMeta:
 
 
 # NOTE: Replace with paper-exact cases once finalized.
-def get_default_case_studies(terrain_size: int) -> List[CaseStudyConfig]:
+def get_default_case_studies() -> List[CaseStudyConfig]:
     """Return 4 representative case studies for current terrain size."""
     # Keep same normalized layout as legacy 500x500 examples
     base_params = dict(
-        N=max(20, int(round(50 * scale))),
-        k=2.0,
-        alpha=45.0,
-        beta=60.0,
-        L_max=100.0 * scale,
-        L_min=40.0 * scale,
-        l=10.0 * scale,
-        p=0.05,
-        # terrain_size=terrain_size,
+        N=config.N,
+        k=config.k,
+        alpha=config.alpha,
+        beta=config.beta,
+        L_max=config.L_max,
+        L_min=config.L_min,
+        l=config.l,
+        p=config.p,
     )
     return [
         CaseStudyConfig(
             name="Case Study 1",
-            start_point=s(60, 490),
-            target_point=s(430, 10),
+            start_point=(1000, 6500),
+            target_point=(2000, 2000),
             params=SectorParams(**base_params),
             noise_std=0.3,
         ),
         CaseStudyConfig(
             name="Case Study 2",
-            start_point=s(35, 460),
-            target_point=s(460, 35),
-            params=SectorParams(**{**base_params, "L_max": 90.0 * scale}),
+            start_point=(35, 460),
+            target_point=(460, 35),
+            params=SectorParams(**{**base_params, "L_max": 90.0}),
             noise_std=0.3,
         ),
         CaseStudyConfig(
             name="Case Study 3",
-            start_point=s(80, 420),
-            target_point=s(420, 65),
-            params=SectorParams(**{**base_params, "L_max": 110.0 * scale}),
+            start_point=(80, 420),
+            target_point=(420, 65),
+            params=SectorParams(**{**base_params, "L_max": 110.0}),
             noise_std=0.3,
         ),
         CaseStudyConfig(
             name="Case Study 4",
-            start_point=s(40, 440),
-            target_point=s(450, 50),
-            params=SectorParams(**{**base_params, "L_max": 120.0 * scale}),
+            start_point=(40, 440),
+            target_point=(450, 50),
+            params=SectorParams(**{**base_params, "L_max": 120.0}),
             noise_std=0.5,
         ),
     ]
@@ -216,16 +215,16 @@ def plot_case_result(
     H, W = terrain.shape
     levels = np.linspace(terrain.min(), terrain.max(), 30)
     cf = axes[0].imshow(terrain, cmap="terrain_r", extent=(0, W, 0, H))
-    axes[0].contourf(terrain, levels=levels, cmap="terrain_r", alpha=0.85)
-    axes[0].contour(terrain, levels=levels[::3], colors="k", linewidths=0.25, alpha=0.35)
+    axes[0].contourf(terrain, levels=levels, cmap="terrain_r", extent=(0, W, 0, H), alpha=0.85)
+    axes[0].contour(terrain, levels=levels[::3], extent=(0, W, 0, H), colors="k", linewidths=0.25, alpha=0.35)
     _draw_path(axes[0], result)
     axes[0].set_title(f"{title}\nDEM Terrain & Planned TAN Path")
     axes[0].set_xlabel("X (grid)")
     axes[0].set_ylabel("Y (grid)")
     axes[0].legend(loc="lower right", fontsize=8)
-    fig.colorbar(cf, ax=axes[0], fraction=0.046, pad=0.03, label="Elevation-like value")
+    fig.colorbar(cf, ax=axes[0], fraction=0.046, pad=0.03, label="Elevation (m)")
 
-    # Right panel: entropy map + suitability + path
+    # Center panel: entropy map + suitability + path
     ent = planner.entropy_map
     blk = planner.params.N
     ext = (0, ent.shape[1] * blk, 0, ent.shape[0] * blk)
@@ -233,7 +232,7 @@ def plot_case_result(
         ent,
         origin="lower",
         extent=ext,
-        cmap="viridis",
+        cmap="RdYlGn",
         interpolation="nearest",
         aspect="equal",
     )
@@ -254,6 +253,26 @@ def plot_case_result(
     axes[1].legend(loc="lower right", fontsize=8)
     fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.03, label="Block entropy")
 
+    # Right panel: entropy map + suitability + path
+    blk = planner.params.N
+    ext = (0, ent.shape[1] * blk, 0, ent.shape[0] * blk)
+    im = axes[2].imshow(
+        planner.suitability_map.astype(float),
+        origin="lower",
+        extent=ext,
+        cmap="RdYlGn",
+        interpolation="nearest",
+        aspect="equal",
+    )
+    _draw_path(axes[2], result, color="orange")
+    axes[2].set_title(
+        f"{title}\nEntropy blocks + suitable regions\nThreshold={planner.threshold:.4f}"
+    )
+    axes[2].set_xlabel("X (grid)")
+    axes[2].set_ylabel("Y (grid)")
+    axes[2].legend(loc="lower right", fontsize=8)
+    fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.03, label="TAN suitability (binary)")
+
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
 
@@ -271,7 +290,7 @@ def run_case(
         terrain=terrain,
         params=case.params,
         noise_std=case.noise_std,
-        entropy_threshold=None,
+        entropy_threshold=config.entropy_threshold,
         n_pf_particles=300,
         verbose=verbose,
     )
@@ -367,6 +386,7 @@ def main() -> None:
             f"distance={metrics.total_distance:.2f}m, "
             f"max_err={metrics.max_tan_error:.2f}m, mean_err={metrics.mean_tan_error:.2f}m"
         )
+        break
 
     checks = verify_results(all_metrics)
 
