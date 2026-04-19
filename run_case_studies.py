@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Wedge
 import numpy as np
 from scipy.ndimage import zoom
 
@@ -180,6 +181,52 @@ def load_terrain_for_case_studies(
     return terrain.astype(np.float64), meta
 
 
+def _draw_sector_fans(ax: plt.Axes, result: PathPlanningResult, params: SectorParams) -> None:
+    """Draw sector-search fan regions used during iterative waypoint search."""
+    aided = result.target_aided_point
+    if aided is None:
+        return
+
+    # In planner loop, sector search is performed at start and each non-target-aided waypoint.
+    centers: List[Tuple[float, float]] = [result.start_point]
+    centers.extend((wp.x, wp.y) for wp in result.waypoints if not wp.is_target_aided)
+
+    r_min = params.l
+    r_max = min(max(params.L_R, params.L_min), params.L_max)
+
+    first = True
+    for cx, cy in centers:
+        center_angle = float(np.degrees(np.arctan2(aided.y - cy, aided.x - cx)))
+        theta1 = center_angle - params.alpha
+        theta2 = center_angle + params.alpha
+
+        sector = Wedge(
+            center=(cx, cy),
+            r=r_max,
+            theta1=theta1,
+            theta2=theta2,
+            width=max(r_max - r_min, 1e-6),
+            facecolor="deepskyblue",
+            edgecolor="deepskyblue",
+            alpha=0.10,
+            linewidth=0.8,
+            zorder=4,
+            label="Sector search region" if first else None,
+        )
+        ax.add_patch(sector)
+
+        ax.plot(
+            [cx, cx + r_max * np.cos(np.radians(center_angle))],
+            [cy, cy + r_max * np.sin(np.radians(center_angle))],
+            color="deepskyblue",
+            linestyle="--",
+            linewidth=0.8,
+            alpha=0.6,
+            zorder=5,
+        )
+        first = False
+
+
 def _draw_path(ax: plt.Axes, result: PathPlanningResult, color: str = "white") -> None:
     """Draw planned route including start, waypoints, and target."""
     xs = [result.start_point[0]] + [wp.x for wp in result.waypoints] + [result.target_point[0]]
@@ -218,6 +265,7 @@ def plot_case_result(
     axes[0].contourf(terrain, levels=levels, cmap="terrain_r", extent=(0, W, 0, H), alpha=0.85)
     axes[0].contour(terrain, levels=levels[::3], extent=(0, W, 0, H), colors="k", linewidths=0.25, alpha=0.35)
     _draw_path(axes[0], result)
+    _draw_sector_fans(axes[0], result, planner.params)
     axes[0].set_title(f"{title}\nDEM Terrain & Planned TAN Path")
     axes[0].set_xlabel("X (grid)")
     axes[0].set_ylabel("Y (grid)")
@@ -245,6 +293,7 @@ def plot_case_result(
         linewidths=1.2,
     )
     _draw_path(axes[1], result, color="orange")
+    _draw_sector_fans(axes[1], result, planner.params)
     axes[1].set_title(
         f"{title}\nEntropy blocks + suitable regions\nThreshold={planner.threshold:.4f}"
     )
@@ -265,6 +314,7 @@ def plot_case_result(
         aspect="equal",
     )
     _draw_path(axes[2], result, color="orange")
+    _draw_sector_fans(axes[2], result, planner.params)
     axes[2].set_title(
         f"{title}\nEntropy blocks + suitable regions\nThreshold={planner.threshold:.4f}"
     )
