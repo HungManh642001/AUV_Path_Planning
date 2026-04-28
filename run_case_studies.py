@@ -1,12 +1,12 @@
 """
 run_case_studies.py
 ===================
-Run 4 TAN path-planning case studies, generate visualizations, and
-export metrics/verification reports.
+Run all 4 TAN path-planning case studies, generate visualizations, and
+summarize/verify results against configurable reference values from the paper.
 
-Supports two terrain sources:
-- Synthetic terrain (legacy): generated in-code
-- Real DEM (.tif/.tiff/.hgt): loaded via dem_loader.py
+Usage
+-----
+python run_case_studies.py --output-dir outputs
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import numpy as np
 from scipy.ndimage import zoom
 
 from dem_loader import DEMData, load_dem
+from astar_planner import AStarTerrainPlanner
 from path_planner import PathPlanningResult, TANPathPlanner
 from sector_search import SectorParams
 from terrain_map import generate_synthetic_terrain
@@ -64,10 +65,9 @@ class TerrainSourceMeta:
     used_shape: Tuple[int, int]
 
 
-# NOTE: Replace with paper-exact cases once finalized.
+# NOTE: If you extract exact case settings from the paper PDF, update here.
 def get_default_case_studies() -> List[CaseStudyConfig]:
-    """Return 4 representative case studies for current terrain size."""
-    # Keep same normalized layout as legacy 500x500 examples
+    """Return 4 representative case studies (same terrain, different routes)."""
     base_params = dict(
         N=config.N,
         k=config.k,
@@ -77,34 +77,38 @@ def get_default_case_studies() -> List[CaseStudyConfig]:
         L_min=config.L_min,
         l=config.l,
         p=config.p,
+        l_min=config.l_min,
+        a_max_deg=config.a_max_deg,
+        R=config.R,
+        d_ss=config.d_ss,
     )
     return [
         CaseStudyConfig(
             name="Case Study 1",
-            start_point=(1000, 6500),
-            target_point=(2000, 2000),
+            start_point=(900, 6500),
+            target_point=(2150, 1990),
             params=SectorParams(**base_params),
             noise_std=0.3,
         ),
         CaseStudyConfig(
             name="Case Study 2",
-            start_point=(35, 460),
-            target_point=(460, 35),
-            params=SectorParams(**{**base_params, "L_max": 90.0}),
+            start_point=(800, 6000),
+            target_point=(2000, 2500),
+            params=SectorParams(**{**base_params, "L_max": config.L_max * 0.9}),
             noise_std=0.3,
         ),
         CaseStudyConfig(
             name="Case Study 3",
-            start_point=(80, 420),
-            target_point=(420, 65),
-            params=SectorParams(**{**base_params, "L_max": 110.0}),
+            start_point=(500, 500),
+            target_point=(2000, 5000),
+            params=SectorParams(**{**base_params, "L_max": config.L_max * 1.2}),
             noise_std=0.3,
         ),
         CaseStudyConfig(
             name="Case Study 4",
-            start_point=(40, 440),
-            target_point=(450, 50),
-            params=SectorParams(**{**base_params, "L_max": 120.0}),
+            start_point=(1300, 1000),
+            target_point=(2500, 5000),
+            params=SectorParams(**{**base_params, "L_max": config.L_max * 1.5}),
             noise_std=0.5,
         ),
     ]
@@ -116,7 +120,7 @@ def _clean_dem_array(dem: DEMData) -> np.ndarray:
     invalid = ~np.isfinite(arr)
     if dem.nodata is not None:
         invalid |= arr == dem.nodata
-
+    
     valid = arr[~invalid]
     fill_value = float(np.median(valid)) if valid.size else 0.0
     arr[invalid] = fill_value
@@ -127,19 +131,19 @@ def _resample_to_square(arr: np.ndarray, target_size: int) -> np.ndarray:
     """Resample terrain to target_size x target_size for current planner grid logic."""
     if arr.shape == (target_size, target_size):
         return arr
-
+    
     zy = target_size / arr.shape[0]
     zx = target_size / arr.shape[1]
     return zoom(arr, (zy, zx), order=1)
 
 
-def _normalize_positive(arr: np.ndarray, out_min: float = 50.0, out_max: float = 250.0) -> np.ndarray:
+def __normalize_positive(arr: np.ndarray, out_min: float = 50.0, out_max: float = 250.0) -> np.ndarray:
     """Normalize terrain to positive range for entropy/likelihood stability."""
     amin = float(np.min(arr))
     amax = float(np.max(arr))
     if abs(amax - amin) < 1e-12:
         return np.full_like(arr, (out_min + out_max) / 2.0)
-
+    
     norm = (arr - amin) / (amax - amin)
     return norm * (out_max - out_min) + out_min
 
@@ -156,22 +160,24 @@ def load_terrain_for_case_studies(
         dem = load_dem(dem_path)
         cleaned = _clean_dem_array(dem)
         # resampled = _resample_to_square(cleaned, terrain_size)
-        # terrain = _normalize_positive(resampled)
+        # terrain = __normalize_positive(resampled)
+        
         terrain = cleaned
 
         meta = TerrainSourceMeta(
             source_type="dem",
             source_path=dem_path,
             original_shape=tuple(dem.array.shape),
-            used_shape=tuple(terrain.shape),
+            used_shape=tuple(terrain.shape)
         )
         return terrain.astype(np.float64), meta
-
+    
     terrain = generate_synthetic_terrain(
         size=500,
         seed=terrain_seed,
-        noise_coefficient=noise_coefficient,
+        noise_coefficient=noise_coefficient
     )
+
     meta = TerrainSourceMeta(
         source_type="synthetic",
         source_path=None,
@@ -181,24 +187,22 @@ def load_terrain_for_case_studies(
     return terrain.astype(np.float64), meta
 
 
-def _draw_sector_fans(ax: plt.Axes, result: PathPlanningResult, params: SectorParams) -> None:
+def _draw_sector_fans(ax: plt.Axes, result: PathPlanningResult) -> None:
     """Draw sector-search fan regions used during iterative waypoint search."""
     aided = result.target_aided_point
     if aided is None:
         return
-
+    
     # In planner loop, sector search is performed at start and each non-target-aided waypoint.
     centers: List[Tuple[float, float]] = [result.start_point]
     centers.extend((wp.x, wp.y) for wp in result.waypoints if not wp.is_target_aided)
 
-    r_min = params.l
-    r_max = min(max(params.L_R, params.L_min), params.L_max)
-
     first = True
-    for cx, cy in centers:
+    for i, (cx, cy) in enumerate(centers):
+        r_min, r_max, alpha = result.waypoints[i].params
         center_angle = float(np.degrees(np.arctan2(aided.y - cy, aided.x - cx)))
-        theta1 = center_angle - params.alpha
-        theta2 = center_angle + params.alpha
+        theta1 = center_angle - alpha
+        theta2 = center_angle + alpha
 
         sector = Wedge(
             center=(cx, cy),
@@ -208,7 +212,7 @@ def _draw_sector_fans(ax: plt.Axes, result: PathPlanningResult, params: SectorPa
             width=max(r_max - r_min, 1e-6),
             facecolor="deepskyblue",
             edgecolor="deepskyblue",
-            alpha=0.10,
+            alpha=0.4,
             linewidth=0.8,
             zorder=4,
             label="Sector search region" if first else None,
@@ -224,7 +228,7 @@ def _draw_sector_fans(ax: plt.Axes, result: PathPlanningResult, params: SectorPa
             alpha=0.6,
             zorder=5,
         )
-        first = False
+        first=False
 
 
 def _draw_path(ax: plt.Axes, result: PathPlanningResult, color: str = "white") -> None:
@@ -254,6 +258,7 @@ def plot_case_result(
     result: PathPlanningResult,
     output_path: Path,
     title: str,
+    planner_mode: str,
 ) -> None:
     """Create a 2-panel figure: terrain+path and entropy suitability map."""
     fig, axes = plt.subplots(1, 3, figsize=(20, 14), constrained_layout=True)
@@ -261,18 +266,22 @@ def plot_case_result(
     # Left panel: terrain + path
     H, W = terrain.shape
     levels = np.linspace(terrain.min(), terrain.max(), 30)
-    cf = axes[0].imshow(terrain, cmap="terrain_r", extent=(0, W, 0, H))
-    axes[0].contourf(terrain, levels=levels, cmap="terrain_r", extent=(0, W, 0, H), alpha=0.85)
-    axes[0].contour(terrain, levels=levels[::3], extent=(0, W, 0, H), colors="k", linewidths=0.25, alpha=0.35)
+    cf = axes[0].imshow(terrain, cmap="terrain", extent=(0, W, 0, H))
+    axes[0].contourf(terrain, origin="lower", levels=levels, cmap="terrain", extent=(0, W, 0, H), alpha=0.85)
+    axes[0].contour(terrain, origin="lower", levels=levels[::3], extent=(0, W, 0, H), colors="k", linewidths=0.4, alpha=0.5)
+    axes[0].contour(terrain, levels=[0], colors='lightblue', linewidths=1, linestyles='solid')
+
+    if planner_mode == "sector":
+        _draw_sector_fans(axes[0], result)
     _draw_path(axes[0], result)
-    _draw_sector_fans(axes[0], result, planner.params)
-    axes[0].set_title(f"{title}\nDEM Terrain & Planned TAN Path")
-    axes[0].set_xlabel("X (grid)")
-    axes[0].set_ylabel("Y (grid)")
+    axes[0].set_title(f"{title}\nTerrain & Planned TAN Path")
+    axes[0].set_xlabel("X (m)")
+    axes[0].set_ylabel("Y (m)")
     axes[0].legend(loc="lower right", fontsize=8)
+    axes[0].set_ylim(H - 1, 0)
     fig.colorbar(cf, ax=axes[0], fraction=0.046, pad=0.03, label="Elevation (m)")
 
-    # Center panel: entropy map + suitability + path
+    # Center panel: entropy map + suitability + path (block coordinates)
     ent = planner.entropy_map
     blk = planner.params.N
     ext = (0, ent.shape[1] * blk, 0, ent.shape[0] * blk)
@@ -292,36 +301,41 @@ def plot_case_result(
         colors="white",
         linewidths=1.2,
     )
+    if planner_mode == "sector":
+        _draw_sector_fans(axes[1], result)
     _draw_path(axes[1], result, color="orange")
-    _draw_sector_fans(axes[1], result, planner.params)
     axes[1].set_title(
         f"{title}\nEntropy blocks + suitable regions\nThreshold={planner.threshold:.4f}"
     )
-    axes[1].set_xlabel("X (grid)")
-    axes[1].set_ylabel("Y (grid)")
+    axes[1].set_xlabel("X (m)")
+    axes[1].set_ylabel("Y (m)")
     axes[1].legend(loc="lower right", fontsize=8)
+    axes[1].set_ylim(H - 1, 0)
     fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.03, label="Block entropy")
 
-    # Right panel: entropy map + suitability + path
+    # Right panel: entropy map + suitability + path (block coordinates)
+    ent = planner.entropy_map
     blk = planner.params.N
     ext = (0, ent.shape[1] * blk, 0, ent.shape[0] * blk)
     im = axes[2].imshow(
-        planner.suitability_map.astype(float),
+        planner.suitability_map.astype(int),
         origin="lower",
         extent=ext,
         cmap="RdYlGn",
-        interpolation="nearest",
-        aspect="equal",
+        vmin=0,
+        vmax=1
     )
+    if planner_mode == "sector":
+        _draw_sector_fans(axes[2], result)
     _draw_path(axes[2], result, color="orange")
-    _draw_sector_fans(axes[2], result, planner.params)
     axes[2].set_title(
         f"{title}\nEntropy blocks + suitable regions\nThreshold={planner.threshold:.4f}"
     )
-    axes[2].set_xlabel("X (grid)")
-    axes[2].set_ylabel("Y (grid)")
+    axes[2].set_xlabel("X (m)")
+    axes[2].set_ylabel("Y (m)")
     axes[2].legend(loc="lower right", fontsize=8)
-    fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.03, label="TAN suitability (binary)")
+    axes[2].set_ylim(H - 1, 0)
+    fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.03, label="TAN Suitable (1=Yes, 0=No)")
 
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
@@ -332,25 +346,35 @@ def run_case(
     case: CaseStudyConfig,
     seed: int,
     out_dir: Path,
+    planner_mode: str,
     verbose: bool,
 ) -> Tuple[PathPlanningResult, TANPathPlanner, CaseStudyMetrics]:
     """Run one case study and return result + planner + serializable metrics."""
     np.random.seed(seed)
-    planner = TANPathPlanner(
-        terrain=terrain,
-        params=case.params,
-        noise_std=case.noise_std,
-        entropy_threshold=config.entropy_threshold,
-        n_pf_particles=300,
-        verbose=verbose,
-    )
+    if planner_mode == "astar":
+        planner = AStarTerrainPlanner(
+            terrain=terrain,
+            params=case.params,
+            noise_std=case.noise_std,
+            entropy_threshold=config.entropy_threshold,
+            verbose=verbose
+        )
+    else:
+        planner = TANPathPlanner(
+            terrain=terrain,
+            params=case.params,
+            noise_std=case.noise_std,
+            entropy_threshold=config.entropy_threshold,
+            n_pf_particles=config.n_particles,
+            verbose=verbose,
+        )
 
     result = planner.plan_path(
         start_x=case.start_point[0],
         start_y=case.start_point[1],
         target_x=case.target_point[0],
         target_y=case.target_point[1],
-        max_iterations=50,
+        max_iterations=config.max_iterations,
     )
 
     metrics = CaseStudyMetrics(
@@ -366,8 +390,8 @@ def run_case(
         else None,
     )
 
-    fig_path = out_dir / f"{case.name.lower().replace(' ', '_')}.png"
-    plot_case_result(terrain, planner, result, fig_path, title=case.name)
+    fig_path = out_dir / f"{case.name.lower().replace(' ', '_')}_{planner_mode}.png"
+    plot_case_result(terrain, planner, result, fig_path, title=case.name, planner_mode=planner_mode)
 
     return result, planner, metrics
 
@@ -388,12 +412,13 @@ def verify_results(metrics: List[CaseStudyMetrics]) -> Dict[str, Dict[str, str]]
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run 4 TAN path-planning case studies + plotting.")
     parser.add_argument("--output-dir", type=str, default="outputs", help="Directory for plots and JSON outputs.")
-    parser.add_argument("--dem-path", type=str, default=None, help="Path to DEM file (.tif/.tiff/.hgt).")
-    # parser.add_argument("--terrain-size", type=int, default=500, help="Terrain size used by planner (default 500).")
+    parser.add_argument("--dem-path", type=str, default=None, help="Path to DEM folder (.hgt).")
+    # parser.add_argument("--terrain-size", type=int, default=500, help="Terrain size used b planner (default 500).")
     parser.add_argument("--terrain-seed", type=int, default=42, help="Seed for synthetic terrain generation.")
     parser.add_argument("--noise-coef", type=float, default=0.3, help="Synthetic terrain noise coefficient.")
     parser.add_argument("--planner-seed", type=int, default=2026, help="Base seed for planner stochastic simulation.")
     parser.add_argument("--quiet", action="store_true", help="Disable verbose planner logs.")
+    parser.add_argument("--planner-mode", type=str, default="astar", choices=["sector", "astar"], help="Path planner backend: sector (legacy) or astar (global search).")
     args = parser.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -410,10 +435,11 @@ def main() -> None:
         terrain_meta.source_type,
         "| original_shape=", terrain_meta.original_shape,
         "| used_shape=", terrain_meta.used_shape,
-        "| source_path=", terrain_meta.source_path,
+        "| source_path=", terrain_meta.source_path, 
     )
 
     cases = get_default_case_studies()
+
     all_metrics: List[CaseStudyMetrics] = []
 
     for i, case in enumerate(cases):
@@ -422,11 +448,12 @@ def main() -> None:
         print(f"Running {case.name} | start={case.start_point} -> target={case.target_point} | seed={seed}")
         print(f"{'=' * 72}")
 
-        _, _, metrics = run_case(
+        result, _, metrics = run_case(
             terrain=terrain,
             case=case,
             seed=seed,
             out_dir=out_dir,
+            planner_mode=args.planner_mode,
             verbose=not args.quiet,
         )
         all_metrics.append(metrics)
@@ -436,7 +463,6 @@ def main() -> None:
             f"distance={metrics.total_distance:.2f}m, "
             f"max_err={metrics.max_tan_error:.2f}m, mean_err={metrics.mean_tan_error:.2f}m"
         )
-        break
 
     checks = verify_results(all_metrics)
 
