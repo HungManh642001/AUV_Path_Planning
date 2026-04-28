@@ -31,21 +31,6 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 
 @dataclass
-class TANPoint:
-    """Represents a TAN-suitable waypoint."""
-    x: float
-    y: float
-    entropy: float
-    is_target_aided: bool = False
-    tan_location_error: float = 0.0
-
-    def __repr__(self):
-        tag = " [TARGET-AIDED]" if self.is_target_aided else ""
-        return (f"TANPoint(x={self.x:.1f}, y={self.y:.1f}, "
-                f"entropy={self.entropy:.4f}, err={self.tan_location_error:.2f}m){tag}")
-
-
-@dataclass
 class SectorParams:
     """Parameters for the sector search algorithm."""
     N: int = 50              # TAN-suitable area block size (m)
@@ -57,6 +42,17 @@ class SectorParams:
     l: float = 10.0          # AUV turning circle (m)
     p: float = 0.05          # INS error ratio (5% of distance)
     terrain_size: int = 500  # Terrain map size (m)
+    
+    # Flight-constraint parameters
+    l_min: float = 20.0
+    a_max_deg: float = 60.0
+    R: float = 30.0
+    l_n: float = 20.0
+    d_ss: float = 25.0
+
+    nav_sigma_min: float = 5
+    suitability_min_ratio: float = 0.7  # Minimum expected suitability coverage along curved segment
+    curve_samples: int = 15             # Number of curve samples for suitability check
 
     @property
     def L_R(self) -> float:
@@ -88,6 +84,22 @@ class SectorParams:
     def alpha_max_deg(self) -> float:
         """Maximum half sector angle in degrees (Eq.8, limit 45°)."""
         return 45.0
+    
+
+@dataclass
+class TANPoint:
+    """Represents a TAN-suitable waypoint."""
+    x: float
+    y: float
+    entropy: float
+    is_target_aided: bool = False
+    tan_location_error: float = 0.0
+    params: Tuple[float, float, float] = None
+
+    def __repr__(self):
+        tag = " [TARGET-AIDED]" if self.is_target_aided else ""
+        return (f"TANPoint(x={self.x:.1f}, y={self.y:.1f}, "
+                f"entropy={self.entropy:.4f}, err={self.tan_location_error:.2f}m){tag}")
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +231,12 @@ def search_tan_suitable_in_sector(
     apply_limit_lines: bool = False,
     start_x: float = None,
     start_y: float = None,
+    prev_x: float = None,
+    prev_y: float = None,
+    next_ref_x: float = None,
+    next_ref_y: float = None,
+    enforce_flight_constraints: bool = True,
+    segment_mode: str = "middle",
 ) -> Optional[TANPoint]:
     """
     Search for the best TAN-suitable area within the sector.
@@ -246,6 +264,14 @@ def search_tan_suitable_in_sector(
         Whether to apply limit line constraints (used near target).
     start_x, start_y : float or None
         Original start point (needed for limit line direction).
+    prev_x, prev_y: float or None
+        Previous position before current AUV position (for incoming turn angle).
+    next_ref_x, next_ref_y: float or None
+        Expected next_reference target after candidate point (for outgoing angle).
+    enforce_flight_constraints: bool
+        Whether to enforce missile segment constraints while selecting candidates.
+    segment_mode: str
+        One of {"first", "middle", "last"}.
 
     Returns
     -------
@@ -260,10 +286,14 @@ def search_tan_suitable_in_sector(
     L_R = params.L_R
     L_r = params.l  # minimum radius = turning circle
 
-    # Constrain L_R to not exceed L_max
+    # Constrain L_R to not exceed L_max and also ensure L_R >= L_min
     L_R = min(L_R, params.L_max)
-    # Also ensure L_R >= L_min
     L_R = max(L_R, params.L_min)
+
+    if segment_mode == 'first':
+        L_R = L_R + params.l_min
+        L_r = L_r + params.l_min
+        
 
     alpha = params.alpha  # half sector angle in degrees
 
@@ -287,6 +317,29 @@ def search_tan_suitable_in_sector(
             if apply_limit_lines and start_x is not None:
                 if not is_point_within_limit_lines(
                     cx, cy, target_x, target_y, start_x, start_y, params.beta
+                ):
+                    continue
+            
+            # Enforce flight constraints during planning stage
+            if enforce_flight_constraints:
+                seg_dist = distance((auv_x, auv_y), (cx, cy))
+                a_in = (
+                    compute_turn_angle_deg((prev_x, prev_y), (auv_x, auv_y), (cx, cy))
+                    if prev_x is not None and prev_y is not None
+                    else 0.0
+                )
+                a_out = (
+                    compute_turn_angle_deg((auv_x, auv_y), (cx, cy), (next_ref_x, next_ref_y))
+                    if next_ref_x is not None and next_ref_y is not None
+                    else params.a_max_deg
+                )
+
+                if not is_segment_feasible_by_flight_constraints(
+                    seg_dist=seg_dist,
+                    params=params,
+                    a_in_deg=a_in,
+                    a_out_deg=a_out,
+                    mode=segment_mode
                 ):
                     continue
 
@@ -313,11 +366,11 @@ def search_tan_suitable_in_sector(
     l_norm = (laterals - laterals.min()) / l_range
 
     # Score: high entropy + low lateral deviation
-    scores = e_norm - 0.3 * l_norm
+    scores = e_norm - 0.8 * l_norm
     best_idx = int(np.argmax(scores))
 
     bx, by, bent, _, _ = candidates[best_idx]
-    return TANPoint(x=bx, y=by, entropy=bent)
+    return TANPoint(x=bx, y=by, entropy=bent, params=(L_r, L_R, alpha))
 
 
 def _distance_to_line(
@@ -334,6 +387,64 @@ def _distance_to_line(
     if denom < 1e-10:
         return distance((px, py), (x1, y1))
     return abs(dy * px - dx * py + x2 * y1 - y2 * x1) / denom
+
+
+def compute_turn_angle_deg(
+    p_prev: Tuple[float, float],
+    p_curr: Tuple[float, float],
+    p_next: Tuple[float, float],
+) -> float:
+    """Absolute heading change at waypoint p_curr."""
+    v1 = np.array([p_curr[0] - p_prev[0], p_curr[1] - p_prev[1]], dtype=np.float64)
+    v2 = np.array([p_next[0] - p_curr[0], p_next[1] - p_curr[1]], dtype=np.float64)
+    n1 = np.linalg.norm(v1)
+    n2 = np.linalg.norm(v2)
+    if n1 < 1e-10 or n2 < 1e-10:
+        return 0.0
+    cos_a = float(np.dot(v1, v2) / (n1 * n2))
+    cos_a = float(np.clip(cos_a, -1.0, 1.0))
+    return float(np.degrees(np.arccos(cos_a)))
+
+
+def segment_constraint_min_distance(
+    params: SectorParams,
+    a_in_deg: float,
+    a_out_deg: float,
+    mode: str,
+) -> float:
+    """
+    Compute minimum required segment distance by flight constraints.
+    
+    mode:
+      - "first": d_1 = l_1 + R * tan(a_1 / 2), with l_1 >= l_min
+      - "middle": d_{i+1} = R * (tan(a_i / 2) + tan(a_{i+1}/2)) + l_{i+1}
+      - "last": not used for min-only form; see interval check in is_segment_feasible_by_flight_constrants()
+    """
+    a_in = np.radians(max(a_in_deg, 0.0))
+    a_out = np.radians(max(a_out_deg, 0.0))
+    if mode == 'first':
+        return params.l_min + params.R * np.tan(a_out / 2.0)
+    else:
+        return params.R * (np.tan(a_in / 2.0) + np.tan(a_out / 2.0))
+
+
+def is_segment_feasible_by_flight_constraints(
+    seg_dist: float,
+    params: SectorParams,
+    a_in_deg: float,
+    a_out_deg: float,
+    mode: str = "middle",
+) -> bool:
+    """Check turn-angle and distance constraints for a segment."""
+    if a_in_deg > params.a_max_deg or a_out_deg > params.a_max_deg:
+        return False
+    if mode == "last":
+        offset = params.R * np.tan(np.radians(max(a_in_deg, 0.0)) / 2.0)
+        d_lower = offset + params.TA_min
+        d_upper = offset + params.TA_max
+        return d_lower <= seg_dist <= d_upper
+    required = segment_constraint_min_distance(params, a_in_deg, a_out_deg, mode)
+    return seg_dist >= required
 
 
 # ---------------------------------------------------------------------------
@@ -384,11 +495,6 @@ def search_target_aided_point(
     TA_min = params.TA_min
     TA_max = params.TA_max
 
-    # Direction from target toward start (backward direction)
-    dx_ts = start_x - target_x
-    dy_ts = start_y - target_y
-    backward_angle = np.degrees(np.arctan2(dy_ts, dx_ts))
-
     candidates = []
 
     for iy in range(n_y):
@@ -405,11 +511,9 @@ def search_target_aided_point(
                 continue
 
             # Must be within limit angle beta from backward direction
-            dx_tp = cx - target_x
-            dy_tp = cy - target_y
-            point_angle = np.degrees(np.arctan2(dy_tp, dx_tp))
-            diff = (point_angle - backward_angle + 180) % 360 - 180
-            if abs(diff) > params.beta:
+            if not is_point_within_limit_lines(
+                cx, cy, target_x, target_y, start_x, start_y, params.beta
+            ): 
                 continue
 
             entropy = entropy_map[iy, ix]
@@ -474,6 +578,115 @@ def _search_target_aided_relaxed(
 
     best = max(candidates, key=lambda c: c[2])
     return TANPoint(x=best[0], y=best[1], entropy=best[2], is_target_aided=True)
+
+
+def search_dynamic_target_aided_point(
+    current_x: float,
+    current_y: float,
+    target_x: float,
+    target_y: float,
+    start_x: float,
+    start_y: float,
+    entropy_map: np.ndarray,
+    suitability_map: np.ndarray,
+    params: SectorParams,
+) -> Optional[TANPoint]:
+    """
+    The target-aided point is a TAN-suitable area within the annular region
+    [|TA|, |TB|] from the target, within the limit angle beta from the
+    start->target centerline (on the start side).
+
+    Dynamic target-aided point search using constraint:
+        d_n is distance from target-aided point to target, and
+
+        R * tan(a_{n-1}/2) + |TA| <= d_n <= R * tan(a_{n-1}/2) + |TB|
+    
+    Here a_{n-1} is computed at candidate aided point with geometry: 
+        current -> aided -> target
+
+    Parameters
+    ----------
+    current_x, current_y: float
+        Current point coordinates.
+    target_x, target_y : float
+        Target point coordinates.
+    start_x, start_y : float
+        Starting point coordinates.
+    entropy_map : np.ndarray
+        Block entropy map.
+    suitability_map : np.ndarray
+        Block suitability map.
+    params : SectorParams
+        Algorithm parameters.
+
+    Returns
+    -------
+    aided_point : TANPoint or None
+    """
+    block_size = params.N
+    n_y, n_x = suitability_map.shape
+
+    TA_min = params.TA_min
+    TA_max = params.TA_max
+
+    candidates = []
+
+    for iy in range(n_y):
+        for ix in range(n_x):
+            if not suitability_map[iy, ix]:
+                continue
+
+            cx = ix * block_size + block_size / 2
+            cy = iy * block_size + block_size / 2
+
+            # Distance from target
+            a_last_deg = compute_turn_angle_deg(
+                (current_x, current_y), (cx, cy), (target_x, target_y)
+            )
+            if a_last_deg >= params.a_max_deg:
+                continue
+
+            d_n = distance((cx, cy), (target_x, target_y))
+
+            if not is_segment_feasible_by_flight_constraints(
+                seg_dist=d_n, params=params, 
+                a_in_deg=a_last_deg,
+                a_out_deg=0.0,
+                mode="last"
+            ):
+                continue
+
+            # Must be within limit angle beta from backward direction
+            if not is_point_within_limit_lines(
+                cx, cy, target_x, target_y, start_x, start_y, params.beta
+            ): 
+                continue
+
+            entropy = entropy_map[iy, ix]
+            candidates.append((cx, cy, entropy, d_n))
+
+    if not candidates:
+        # Relax distance constraint and try again with wider search
+        return None
+    
+    entropies = np.array([c[2] for c in candidates])
+    laterals = np.array([c[3] for c in candidates])
+
+    # Normalize
+    e_range = entropies.max() - entropies.min() + 1e-10
+    l_range = laterals.max() - laterals.min() + 1e-10
+
+    e_norm = (entropies - entropies.min()) / e_range
+    l_norm = (laterals - laterals.min()) / l_range
+
+    # Score: high entropy + low lateral deviation
+    scores = e_norm - 0.1 * l_norm
+    best_idx = int(np.argmax(scores))
+
+    bx, by, bent, _ = candidates[best_idx]
+
+    return TANPoint(x=bx, y=by, entropy=bent, params=(params.l, params.L_R, params.alpha), is_target_aided=True)
+
 
 
 # ---------------------------------------------------------------------------
