@@ -128,7 +128,7 @@ def plot_terrain(terrain: np.ndarray, title: str = "A Priori Terrain Map",
 
     # Contour filled plot
     levels = np.linspace(terrain.min(), terrain.max(), 30)
-    cf = ax.contourf(terrain, levels=levels, cmap='terrain_r', alpha=0.85)
+    cf = ax.contourf(terrain, levels=levels, cmap='terrain', alpha=0.85)
     cs = ax.contour(terrain, levels=levels[::3], colors='k', linewidths=0.4, alpha=0.5)
     plt.colorbar(cf, ax=ax, label='Depth (m)')
 
@@ -155,7 +155,10 @@ def plot_terrain(terrain: np.ndarray, title: str = "A Priori Terrain Map",
 
 
 if __name__ == "__main__":
-    terrain = generate_synthetic_terrain(size=500, seed=42, noise_coefficient=0.3)
+    # terrain = generate_synthetic_terrain(size=500, seed=42, noise_coefficient=0.3)
+    from dem_loader import load_dem
+    dem = load_dem("SRTM")
+    terrain = dem.array
     print(f"Terrain shape: {terrain.shape}")
     print(f"Depth range: {terrain.min():.2f} m ~ {terrain.max():.2f} m")
-    plot_terrain(terrain, title="Synthetic Bathymetric Terrain (500m × 500m)")
+    plot_terrain(terrain, title="Synthetic Bathymetric Terrain")
