@@ -260,13 +260,15 @@ def find_all_suitable_blocks(
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from terrain_map import generate_synthetic_terrain
-    from dem_loader import load_dem 
+    from dem_loader import load_dem
+    import config
 
     # terrain = generate_synthetic_terrain(size=500, seed=42, noise_coefficient=0.3)
-    dem_data = load_dem("data")
-    terrain = dem_data.array
+    dem = load_dem("SRTM")
+    terrain = dem.array
+    H, W = terrain.shape
     entropy_map, suitability_map, threshold = build_suitability_map(
-        terrain, block_size=50
+        terrain, block_size=config.N, entropy_threshold=config.entropy_threshold
     )
 
     print(f"Entropy map shape: {entropy_map.shape}")
@@ -274,26 +276,39 @@ if __name__ == "__main__":
     print(f"Threshold (median): {threshold:.4f}")
     print(f"Number of suitable blocks: {suitability_map.sum()} / {suitability_map.size}")
 
-    W, H = terrain.shape
-    fig, axes = plt.subplots(1, 2, figsize=(10, 10))
+    fig, axes = plt.subplots(1, 3, figsize=(20, 14))
+
+    # Terrain
+    levels = np.linspace(terrain.min(), terrain.max(), 30)
+    im0 = axes[0].imshow(terrain, cmap="terrain", extent=(0, W, 0, H))
+    axes[0].contourf(terrain, origin="lower", levels=levels, cmap="terrain", extent=(0, W, 0, H), alpha=0.85)
+    axes[0].contour(terrain, origin="lower", levels=levels[::3], extent=(0, W, 0, H), colors="k", linewidths=0.4, alpha=0.5)
+    axes[0].contour(terrain, levels=[0], colors='lightblue', linewidths=1, linestyles='solid')
+    axes[0].set_title("Terrain Elevation")
+    axes[0].set_xlabel("X (m)")
+    axes[0].set_ylabel("Y (m)")
+    axes[0].set_ylim(H - 1, 0)
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.03, label="Elevation (m)")
 
     # Entropy map
-    im = axes[0].imshow(entropy_map, origin='lower', cmap='RdYlGn',
-                        extent=[0, H, 0, W])
-    plt.colorbar(im, ax=axes[0], label='Terrain Elevation Entropy')
-    axes[0].set_title(f'Block Entropy Map (threshold={threshold:.4f})')
-    axes[0].set_xlabel('X (m)')
-    axes[0].set_ylabel('Y (m)')
-
-    # Suitability map
-    im2 = axes[1].imshow(suitability_map.astype(int), origin='lower',
-                         cmap='RdYlGn', extent=[0, H, 0, W], vmin=0, vmax=1)
-    plt.colorbar(im2, ax=axes[1], label='TAN Suitable (1=Yes, 0=No)')
-    axes[1].set_title('TAN Suitability Map')
+    im1 = axes[1].imshow(entropy_map, origin='lower', cmap='RdYlGn',
+                        extent=[0, W, 0, H])
+    plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.03, label='Terrain Elevation Entropy')
+    axes[1].set_title(f'Block Entropy Map (threshold={threshold:.4f})')
     axes[1].set_xlabel('X (m)')
     axes[1].set_ylabel('Y (m)')
+    axes[1].set_ylim(H - 1, 0)
+
+    # Suitability map
+    im2 = axes[2].imshow(suitability_map.astype(int), origin='lower',
+                         cmap='RdYlGn', extent=[0, W, 0, H], vmin=0, vmax=1)
+    plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.03, label='TAN Suitable (2=Yes, 0=No)')
+    axes[2].set_title('TAN Suitability Map')
+    axes[2].set_xlabel('X (m)')
+    axes[2].set_ylabel('Y (m)')
+    axes[2].set_ylim(H - 1, 0)
 
     plt.tight_layout()
-    plt.savefig('suitability_map.png', dpi=150)
+    plt.savefig('suitability_map.png', dpi=300)
     plt.show()
     print("Saved suitability_map.png")
