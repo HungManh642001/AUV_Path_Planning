@@ -23,6 +23,7 @@ The algorithm generates a sequence of TAN waypoints forming the path.
 """
 
 import numpy as np
+import copy
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass, field
 
@@ -31,6 +32,9 @@ from sector_search import (
     search_tan_suitable_in_sector,
     search_target_aided_point,
     angle_between, distance, is_point_in_sector,
+    search_dynamic_target_aided_point,
+    compute_turn_angle_deg,
+    is_segment_feasible_by_flight_constraints,
     print_sector_analysis,
 )
 from tan_suitability import (
@@ -199,6 +203,36 @@ class TANPathPlanner:
             ins_error_std=ins_error_std,
         )
         return est_x, est_y, err
+    
+    def _is_final_leg_feasible(
+        self,
+        prev_x: float,
+        prev_y: float,
+        auv_x: float,
+        auv_y: float,
+        aided_x: float,
+        aided_y: float,
+        target_x: float,
+        target_y: float,
+    ) -> bool:
+        """
+        Check final-segment constraint: 
+        """
+        seg_dist = distance((auv_x, auv_y), (aided_x, aided_y))
+        a_in = compute_turn_angle_deg(
+            (prev_x, prev_y), (auv_x, auv_y), (aided_x, aided_y)
+        )
+        a_out = compute_turn_angle_deg(
+            (auv_x, auv_y), (aided_x, aided_y), (target_x, target_y)
+        )
+        
+        return is_segment_feasible_by_flight_constraints(
+            seg_dist=seg_dist,
+            params=self.params,
+            a_in_deg=a_in,
+            a_out_deg=a_out,
+            mode="middle",
+        )  
 
     def plan_path(
         self,
@@ -235,62 +269,69 @@ class TANPathPlanner:
                   f"({start_x:.0f},{start_y:.0f}) → ({target_x:.0f},{target_y:.0f})")
 
         # ── Step 1: Find target-aided point ──────────────────────────────────
-        aided_point = search_target_aided_point(
-            target_x, target_y,
-            start_x, start_y,
-            self.entropy_map, self.suitability_map,
-            self.params,
-        )
-
-        if aided_point is None:
-            if self.verbose:
-                print("[PathPlanner] WARNING: No target-aided point found! "
-                      "Using target directly.")
-            # Use a synthetic aided point near target
-            aided_point = TANPoint(
-                x=target_x, y=target_y,
-                entropy=0.0, is_target_aided=True
-            )
-        else:
-            if self.verbose:
-                print(f"[PathPlanner] Target-aided point: "
-                      f"({aided_point.x:.1f}, {aided_point.y:.1f}), "
-                      f"entropy={aided_point.entropy:.4f}, "
-                      f"dist={distance((aided_point.x, aided_point.y), (target_x, target_y)):.2f}m")
-
-        result.target_aided_point = aided_point
+        aided_point = None
 
         # ── Step 2: Iterative sector search ──────────────────────────────────
         # Current AUV true position (starts at start point)
         auv_x, auv_y = start_x, start_y
+        prev_x, prev_y = None, None
         ins_x, ins_y = start_x, start_y
         dist_since_last_fix = 0.0
         total_dist = 0.0
 
-        # The "current target" for sector orientation is the aided point
-        current_target_x = aided_point.x
-        current_target_y = aided_point.y
+        # Use final target for orientation; aided point is searched dynamically.
+        current_target_x = target_x
+        current_target_y = target_y
 
         waypoints = []
         iteration = 0
 
+        dynamic_aided = search_dynamic_target_aided_point(
+            current_x=auv_x,
+            current_y=auv_y,
+            target_x=target_x,
+            target_y=target_y,
+            start_x=start_x, 
+            start_y=start_y,
+            entropy_map=self.entropy_map,
+            suitability_map=self.suitability_map,
+            params=self.params,
+        )
+
+        if dynamic_aided is not None:
+            aided_point = dynamic_aided
+            result.target_aided_point = aided_point
+            current_target_x = aided_point.x
+            current_target_y = aided_point.y
+
         while iteration < max_iterations:
             iteration += 1
-
+            
             # Check if aided point is within current sector
-            if self._is_target_in_sector(
+            if aided_point is not None and self._is_target_in_sector(
                 auv_x, auv_y, target_x, target_y,
                 current_target_x, current_target_y
             ):
-                if self.verbose:
-                    print(f"[PathPlanner] Iter {iteration}: "
-                          f"Target-aided point is in sector → navigating to it")
-                break
+                # Only stop early if final leg to target also meets missile constraints.         
+                if prev_x is not None and not self._is_final_leg_feasible(
+                    prev_x, prev_y,
+                    auv_x, auv_y,
+                    current_target_x, current_target_y,
+                    target_x, target_y
+                ):
+                    if self.verbose:
+                        print(f"[PathPlanner] Iter {iteration}: "
+                            f"Target-aided point is in sector but final leg violates flight constraints; continue searching.")
+                else:
+                    if self.verbose:
+                        print(f"[PathPlanner] Iter {iteration}: "
+                            f"Target-aided point is in sector → navigating to it")
+                    break
 
             # Check if we're close enough to the aided point
             dist_to_aided = distance((auv_x, auv_y),
                                      (current_target_x, current_target_y))
-            if dist_to_aided < self.params.N:
+            if aided_point is not None and dist_to_aided < self.params.N:
                 if self.verbose:
                     print(f"[PathPlanner] Iter {iteration}: "
                           f"Close to aided point (dist={dist_to_aided:.1f}m) → stopping")
@@ -308,35 +349,36 @@ class TANPathPlanner:
                 self.params,
                 apply_limit_lines=apply_limits,
                 start_x=start_x, start_y=start_y,
+                prev_x=prev_x, prev_y=prev_y,
+                next_ref_x=None, next_ref_y=None,
+                enforce_flight_constraints=True,
+                segment_mode="first" if prev_x is None else "middle",
             )
 
             if next_wp is None:
                 if self.verbose:
                     print(f"[PathPlanner] Iter {iteration}: "
                           f"No TAN-suitable area found in sector. "
-                          f"Expanding search...")
+                          f"Expanding search...L_R {self.params.L_R}")
                 # Try with relaxed parameters (larger sector)
-                relaxed_params = SectorParams(
-                    N=self.params.N,
-                    k=self.params.k * 1.5,
-                    alpha=min(self.params.alpha * 1.2, 60.0),
-                    beta=self.params.beta,
-                    L_max=self.params.L_max * 1.5,
-                    L_min=self.params.L_min,
-                    l=self.params.l,
-                    p=self.params.p,
-                    # terrain_size=self.params.terrain_size,
-                )
+                relaxed_params = copy.deepcopy(self.params)
+                relaxed_params.k = self.params.k * 1.5
+                relaxed_params.alpha=(min(self.params.alpha * 1.2, 60.0))
+
                 next_wp = search_tan_suitable_in_sector(
                     auv_x, auv_y,
                     current_target_x, current_target_y,
                     self.entropy_map, self.suitability_map,
                     relaxed_params,
+                    prev_x=prev_x, prev_y=prev_y,
+                    next_ref_x=None, next_ref_y=None,
+                    enforce_flight_constraints=True,
+                    segment_mode="first" if prev_x is None else "middle",
                 )
                 if next_wp is None:
                     if self.verbose:
                         print(f"[PathPlanner] Iter {iteration}: "
-                              f"Still no suitable area. Stopping search.")
+                              f"Still no suitable area. Stopping search. L_R {relaxed_params.L_R}")
                     break
 
             # Move AUV to next waypoint
@@ -360,6 +402,7 @@ class TANPathPlanner:
             next_wp.tan_location_error = tan_err
 
             # Update AUV position using TAN fix
+            prev_x, prev_y = auv_x, auv_y
             auv_x, auv_y = next_wp.x, next_wp.y
             ins_x, ins_y = est_x, est_y
             dist_since_last_fix = 0.0  # reset after TAN fix
@@ -373,6 +416,14 @@ class TANPathPlanner:
                       f"TAN_err={tan_err:.2f}m")
 
         # ── Step 3: Navigate to target-aided point ────────────────────────────
+        if aided_point is None:
+            if self.verbose:
+                print("[PathPlanner] WARNING: No dynamic target-aided point found. Using target directly.")
+            aided_point = TANPoint(
+                x=target_x, y=target_y, entropy=0.0, is_target_aided=True
+            )
+            result.target_aided_point = aided_point
+
         step_dist = distance((auv_x, auv_y),
                              (aided_point.x, aided_point.y))
         total_dist += step_dist
