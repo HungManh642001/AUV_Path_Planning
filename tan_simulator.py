@@ -367,9 +367,10 @@ def simulate_tan_at_waypoint(
 
 if __name__ == "__main__":
     from terrain_map import generate_synthetic_terrain
+    import config
 
     terrain = generate_synthetic_terrain(size=500, seed=42)
-    pf = ParticleFilterTAN(terrain, n_particles=500, scan_size=20, noise_std=0.3)
+    pf = ParticleFilterTAN(terrain, n_particles=config.n_particles, scan_size=config.scan_size, noise_std=0.3)
 
     # Test at a known position
     true_x, true_y = 250.0, 250.0
